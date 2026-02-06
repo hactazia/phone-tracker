@@ -1,0 +1,70 @@
+name: Android Release
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-and-release-apk:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Get build number
+        id: build_number
+        run: |
+          BUILD_NUMBER=${{ github.run_number }}
+          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "version=1.0.$BUILD_NUMBER" >> $GITHUB_OUTPUT
+
+      - name: Build APK
+        run: ./gradlew assembleRelease
+        env:
+          VERSION_CODE: ${{ steps.build_number.outputs.build_number }}
+          VERSION_NAME: ${{ steps.build_number.outputs.version }}
+
+      - name: Sign APK
+        id: sign_apk
+        uses: r0adkll/sign-android-release@v1
+        with:
+          releaseDirectory: app/build/outputs/apk/release
+          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
+          alias: ${{ secrets.KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
+          keyPassword: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Rename APK
+        run: |
+          mv ${{ steps.sign_apk.outputs.signedReleaseFile }} tracker-v${{ steps.build_number.outputs.version }}.apk
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.build_number.outputs.version }}
+          name: Release v${{ steps.build_number.outputs.version }}
+          body: |
+            Automatic release of Tracker APK
+            Build number: ${{ steps.build_number.outputs.build_number }}
+            Version: ${{ steps.build_number.outputs.version }}
+          files: tracker-v${{ steps.build_number.outputs.version }}.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
