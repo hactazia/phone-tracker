@@ -1,0 +1,24 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Location {
+  uid       String
+  latitude  Float
+  longitude Float
+  accuracy  Float?
+  requested DateTime @default(now())
+  created   DateTime @default(now())
+
+  @@id([uid, requested])
+  @@index([requested])
+  @@map("locations")
+}

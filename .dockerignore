@@ -1,0 +1,44 @@
+# Ignorer les dépendances
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Ignorer les fichiers de développement
+*.log
+.env
+.env.local
+.env.*.local
+
+# Ignorer les fichiers de build
+dist/
+build/
+.next/
+
+# Ignorer les fichiers de test
+coverage/
+.nyc_output/
+
+# Ignorer les fichiers temporaires
+*.tmp
+*.temp
+.DS_Store
+
+# Ignorer les fichiers de base de données locale
+prisma/*.db
+prisma/*.db-journal
+prisma/data/
+
+# Ignorer git
+.git/
+.gitignore
+
+# Ignorer Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Ignorer la configuration IDE
+.vscode/
+.idea/
+*.swp
+*.swo

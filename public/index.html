@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Suivi des Positions</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        border: "hsl(0 0% 20%)",
+                        input: "hsl(0 0% 20%)",
+                        ring: "hsl(0 0% 50%)",
+                        background: "hsl(0 0% 9%)",
+                        foreground: "hsl(0 0% 98%)",
+                        primary: {
+                            DEFAULT: "hsl(0 0% 98%)",
+                            foreground: "hsl(0 0% 9%)",
+                        },
+                        secondary: {
+                            DEFAULT: "hsl(0 0% 15%)",
+                            foreground: "hsl(0 0% 98%)",
+                        },
+                        muted: {
+                            DEFAULT: "hsl(0 0% 15%)",
+                            foreground: "hsl(0 0% 65%)",
+                        },
+                        card: {
+                            DEFAULT: "hsl(0 0% 12%)",
+                            foreground: "hsl(0 0% 98%)",
+                        },
+                    },
+                }
+            }
+        }
+    </script>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .spinner {
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body class="bg-background text-foreground">
+    <div class="flex flex-col h-screen">
+        <div class="border-b bg-card px-6 py-4">
+            <div class="flex flex-wrap gap-4 items-end">
+                <div class="flex flex-col gap-2 min-w-[200px]">
+                    <label for="uid" class="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                        Utilisateur (UID)
+                    </label>
+                    <input 
+                        type="text" 
+                        id="uid" 
+                        list="uidList" 
+                        placeholder="Sélectionnez un utilisateur..."
+                        autocomplete="nope"
+                        class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                    <datalist id="uidList"></datalist>
+                </div>
+
+                <div class="flex flex-col gap-2 min-w-[200px]">
+                    <label for="dateAfter" class="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                        Date Après
+                    </label>
+                    <input 
+                        type="datetime-local" 
+                        id="dateAfter"
+                        class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                </div>
+
+                <div class="flex flex-col gap-2 min-w-[200px]">
+                    <label for="dateBefore" class="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                        Date Avant
+                    </label>
+                    <input 
+                        type="datetime-local" 
+                        id="dateBefore"
+                        class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                </div>
+
+                <button 
+                    onclick="loadLocations()"
+                    class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
+                >
+                    Charger les Positions
+                </button>
+            </div>
+        </div>
+
+        <div class="flex-1 relative">
+            <div id="map" class="w-full h-full"></div>
+
+            <div id="loading" class="hidden absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-card rounded-lg border border-border shadow-lg p-6 z-[2000]">
+                <div class="spinner border-4 border-muted border-t-primary rounded-full w-10 h-10 mx-auto"></div>
+                <p class="mt-3 text-sm text-center text-muted-foreground">Chargement...</p>
+            </div>
+        </div>
+
+        <!-- Modal d'authentification -->
+        <div id="authModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-[3000] flex items-center justify-center p-4">
+            <div class="bg-card rounded-lg border border-border shadow-lg p-6 max-w-md w-full">
+                <h2 class="text-xl font-semibold mb-4">🔒 Authentification requise</h2>
+                <p class="text-sm text-muted-foreground mb-4">
+                    Veuillez entrer votre token d'accès pour continuer.
+                </p>
+                <div class="flex flex-col gap-4">
+                    <input 
+                        type="password" 
+                        id="tokenInput" 
+                        placeholder="Token d'accès..."
+                        autocomplete="new-password"
+                        class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    >
+                    <div id="authError" class="hidden text-sm text-red-500"></div>
+                    <div class="flex gap-2">
+                        <button 
+                            onclick="submitToken()"
+                            class="flex-1 inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
+                        >
+                            Valider
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        let map;
+        let markersLayer;
+        let polylineLayer;
+        let currentLocations = []; // Stocker les locations actuelles
+        let authToken = null; // Token d'authentification
+
+        // Afficher le modal d'authentification
+        function showAuthModal(errorMessage = null) {
+            const modal = document.getElementById('authModal');
+            const errorDiv = document.getElementById('authError');
+            
+            if (errorMessage) {
+                errorDiv.textContent = errorMessage;
+                errorDiv.classList.remove('hidden');
+            } else {
+                errorDiv.classList.add('hidden');
+            }
+            
+            modal.classList.remove('hidden');
+            document.getElementById('tokenInput').focus();
+        }
+
+        // Cacher le modal d'authentification
+        function hideAuthModal() {
+            document.getElementById('authModal').classList.add('hidden');
+            document.getElementById('tokenInput').value = '';
+            document.getElementById('authError').classList.add('hidden');
+        }
+
+        // Valider le token
+        async function submitToken() {
+            const token = document.getElementById('tokenInput').value.trim();
+            
+            if (!token) {
+                showAuthModal('Le token ne peut pas être vide');
+                return;
+            }
+
+            // Tester le token avec une requête simple
+            try {
+                const response = await fetch('/api/users', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (response.ok) {
+                    // Token valide
+                    authToken = token;
+                    localStorage.setItem('authToken', token);
+                    
+                    // Ajouter le token à l'URL
+                    const params = new URLSearchParams(window.location.search);
+                    params.set('token', token);
+                    const newUrl = `${window.location.pathname}?${params.toString()}`;
+                    window.history.replaceState({}, '', newUrl);
+                    
+                    hideAuthModal();
+                    
+                    // Charger les utilisateurs
+                    await loadUsers();
+                } else if (response.status === 401 || response.status === 403) {
+                    showAuthModal('Token invalide');
+                } else {
+                    showAuthModal('Erreur lors de la vérification du token');
+                }
+            } catch (error) {
+                console.error('Error validating token:', error);
+                showAuthModal('Erreur de connexion');
+            }
+        }
+
+        // Charger le token depuis l'URL ou localStorage
+        function loadAuthToken() {
+            const params = new URLSearchParams(window.location.search);
+            const urlToken = params.get('token');
+            
+            if (urlToken) {
+                authToken = urlToken;
+                localStorage.setItem('authToken', urlToken);
+                return urlToken;
+            }
+            
+            const storedToken = localStorage.getItem('authToken');
+            if (storedToken) {
+                authToken = storedToken;
+                return storedToken;
+            }
+            
+            return null;
+        }
+
+        // Initialiser la carte
+        function initMap() {
+            map = L.map('map').setView([48.8566, 2.3522], 13); // Paris par défaut
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors',
+                maxZoom: 19
+            }).addTo(map);
+
+            markersLayer = L.layerGroup().addTo(map);
+            polylineLayer = L.layerGroup().addTo(map);
+
+            // Redessiner les marqueurs quand le zoom change
+            map.on('zoomend', () => {
+                if (currentLocations.length > 0) {
+                    displayLocations(currentLocations, false);
+                }
+            });
+        }
+
+        // Calculer la distance entre deux points (formule de Haversine)
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371; // Rayon de la Terre en km
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        // Charger et afficher les positions
+        async function loadLocations() {
+            const uid = document.getElementById('uid').value.trim();
+            const dateAfter = document.getElementById('dateAfter').value;
+            const dateBefore = document.getElementById('dateBefore').value;
+
+            if (!uid) {
+                alert('Veuillez entrer un UID');
+                return;
+            }
+
+            // Afficher le loader
+            document.getElementById('loading').classList.remove('hidden');
+
+            try {
+                // Construire l'URL avec les paramètres
+                let url = `/api/locations/filtered?uid=${encodeURIComponent(uid)}`;
+                
+                if (dateAfter) {
+                    url += `&after=${encodeURIComponent(new Date(dateAfter).toISOString())}`;
+                }
+                
+                if (dateBefore) {
+                    url += `&before=${encodeURIComponent(new Date(dateBefore).toISOString())}`;
+                }
+
+                const response = await fetch(url, {
+                    headers: authToken ? {
+                        'Authorization': `Bearer ${authToken}`
+                    } : {}
+                });
+                
+                if (response.status === 401 || response.status === 403) {
+                    showAuthModal('Session expirée, veuillez vous reconnecter');
+                    authToken = null;
+                    localStorage.removeItem('authToken');
+                    return;
+                }
+                
+                if (!response.ok) {
+                    throw new Error('Erreur lors du chargement des données');
+                }
+
+                const result = await response.json();
+                
+                if (!result.success) {
+                    throw new Error(result.error || 'Erreur inconnue');
+                }
+
+                displayLocations(result.data);
+                
+                // Mettre à jour l'URL avec les paramètres de recherche
+                const params = new URLSearchParams();
+                params.set('uid', uid);
+                if (dateAfter) {
+                    params.set('after', dateAfter);
+                }
+                if (dateBefore) {
+                    params.set('before', dateBefore);
+                }
+                const newUrl = `${window.location.pathname}?${params.toString()}`;
+                window.history.pushState({}, '', newUrl);
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Erreur: ' + error.message);
+            } finally {
+                document.getElementById('loading').classList.add('hidden');
+            }
+        }
+
+        // Afficher les positions sur la carte
+        function displayLocations(locations, autoFit = true) {
+            // Sauvegarder les locations pour le redessinage au zoom
+            currentLocations = locations;
+            
+            // Nettoyer les anciennes données
+            markersLayer.clearLayers();
+            polylineLayer.clearLayers();
+
+            if (!locations || locations.length === 0) {
+                alert('Aucune position trouvée');
+                return;
+            }
+
+            const coordinates = [];
+            let totalDistance = 0;
+
+            // Trier par date
+            locations.sort((a, b) => new Date(a.requested) - new Date(b.requested));
+
+            // Créer les marqueurs et calculer les distances
+            locations.forEach((location, index) => {
+                const lat = location.latitude;
+                const lng = location.longitude;
+                coordinates.push([lat, lng]);
+
+                // Calculer la distance depuis le point précédent
+                if (index > 0) {
+                    const prevLat = locations[index - 1].latitude;
+                    const prevLng = locations[index - 1].longitude;
+                    totalDistance += calculateDistance(prevLat, prevLng, lat, lng);
+                }
+
+                // Créer le marqueur - utiliser L.circle pour représenter la vraie distance en mètres
+                const markerColor = index === 0 ? '#00ff00' : (index === locations.length - 1 ? '#ff0000' : '#667eea');
+                
+                if (location.accuracy && location.accuracy > 0) {
+                    // Utiliser L.circle avec le rayon en mètres pour la zone d'incertitude
+                    const marker = L.circle([lat, lng], {
+                        radius: location.accuracy, // Rayon en mètres
+                        fillColor: markerColor,
+                        color: '#fff',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 0.15
+                    });
+                    
+                    const popupContent = `
+                        <strong>${index === 0 ? 'Début' : (index === locations.length - 1 ? 'Fin' : 'Point ' + (index + 1))}</strong><br>
+                        <strong>Date:</strong> ${new Date(location.requested).toLocaleString('fr-FR')}<br>
+                        <strong>Position:</strong> ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
+                        <strong>Précision:</strong> ±${location.accuracy.toFixed(0)}m<br>
+                    `;
+                    
+                    marker.bindPopup(popupContent);
+                    markersLayer.addLayer(marker);
+                    
+                    // Ajouter un petit point au centre
+                    const centerMarker = L.circleMarker([lat, lng], {
+                        radius: 3,
+                        fillColor: markerColor,
+                        color: '#fff',
+                        weight: 1,
+                        opacity: 1,
+                        fillOpacity: 1
+                    });
+                    markersLayer.addLayer(centerMarker);
+                } else {
+                    // Pas de précision, utiliser un marqueur simple
+                    const marker = L.circleMarker([lat, lng], {
+                        radius: 6,
+                        fillColor: markerColor,
+                        color: '#fff',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 0.8
+                    });
+                    
+                    const popupContent = `
+                        <strong>${index === 0 ? 'Début' : (index === locations.length - 1 ? 'Fin' : 'Point ' + (index + 1))}</strong><br>
+                        <strong>Date:</strong> ${new Date(location.requested).toLocaleString('fr-FR')}<br>
+                        <strong>Position:</strong> ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
+                    `;
+                    
+                    marker.bindPopup(popupContent);
+                    markersLayer.addLayer(marker);
+                }
+            });
+
+            // Tracer la ligne entre les points
+            if (coordinates.length > 1) {
+                const polyline = L.polyline(coordinates, {
+                    color: '#667eea',
+                    weight: 3,
+                    opacity: 0.7,
+                    smoothFactor: 1
+                });
+                polylineLayer.addLayer(polyline);
+            }
+
+            // Centrer la carte sur les positions uniquement au premier chargement
+            if (autoFit && coordinates.length > 0) {
+                const bounds = L.latLngBounds(coordinates);
+                map.fitBounds(bounds, { padding: [50, 50] });
+            }
+
+        }
+
+        // Charger les paramètres depuis l'URL
+        function loadParamsFromUrl() {
+            const params = new URLSearchParams(window.location.search);
+            
+            const uid = params.get('uid');
+            const after = params.get('after');
+            const before = params.get('before');
+            
+            if (uid) {
+                document.getElementById('uid').value = uid;
+            }
+            if (after) {
+                document.getElementById('dateAfter').value = after;
+            }
+            if (before) {
+                document.getElementById('dateBefore').value = before;
+            }
+            
+            return { uid, after, before };
+        }
+
+        // Charger la liste des utilisateurs disponibles
+        async function loadUsers() {
+            try {
+                const response = await fetch('/api/users', {
+                    headers: authToken ? {
+                        'Authorization': `Bearer ${authToken}`
+                    } : {}
+                });
+                
+                if (response.status === 401 || response.status === 403) {
+                    showAuthModal('Authentification requise');
+                    authToken = null;
+                    localStorage.removeItem('authToken');
+                    return;
+                }
+                
+                if (!response.ok) {
+                    throw new Error('Erreur lors du chargement des utilisateurs');
+                }
+
+                const result = await response.json();
+                
+                if (!result.success || !result.data || result.data.length === 0) {
+                    console.warn('Aucun utilisateur trouvé');
+                    return;
+                }
+
+                // Remplir la datalist avec les UIDs
+                const datalist = document.getElementById('uidList');
+                datalist.innerHTML = '';
+                
+                result.data.forEach(uid => {
+                    const option = document.createElement('option');
+                    option.value = uid;
+                    datalist.appendChild(option);
+                });
+
+                // Charger les paramètres depuis l'URL
+                const urlParams = loadParamsFromUrl();
+                
+                // Si pas d'UID dans l'URL, sélectionner le premier utilisateur
+                const uidInput = document.getElementById('uid');
+                if (!urlParams.uid && result.data.length > 0) {
+                    uidInput.value = result.data[0];
+                }
+
+                console.log(`${result.data.length} utilisateur(s) chargé(s)`);
+
+                // Charger automatiquement les positions si un UID est présent
+                if (uidInput.value) {
+                    await loadLocations();
+                }
+            } catch (error) {
+                console.error('Error loading users:', error);
+            }
+        }
+
+        // Centrer la carte sur la dernière position d'un utilisateur
+        async function centerOnLastPosition(uid) {
+            try {
+                const response = await fetch(`/api/locations/filtered?uid=${encodeURIComponent(uid)}&limit=1`, {
+                    headers: authToken ? {
+                        'Authorization': `Bearer ${authToken}`
+                    } : {}
+                });
+                
+                if (response.status === 401 || response.status === 403) {
+                    return;
+                }
+                
+                if (!response.ok) {
+                    return;
+                }
+
+                const result = await response.json();
+                
+                if (result.success && result.data && result.data.length > 0) {
+                    // Trier pour obtenir la dernière position
+                    const locations = result.data.sort((a, b) => 
+                        new Date(b.requested).getTime() - new Date(a.requested).getTime()
+                    );
+                    
+                    const lastLocation = locations[0];
+                    const lat = lastLocation.latitude;
+                    const lng = lastLocation.longitude;
+                    
+                    // Centrer la carte sur cette position
+                    map.setView([lat, lng], 15);
+                    
+                    // Ajouter un marqueur temporaire
+                    const marker = L.marker([lat, lng], {
+                        icon: L.icon({
+                            iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+                            shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+                            iconSize: [25, 41],
+                            iconAnchor: [12, 41],
+                            popupAnchor: [1, -34],
+                            shadowSize: [41, 41]
+                        })
+                    });
+                    
+                    marker.bindPopup(`
+                        <strong>📍 Dernière position connue</strong><br>
+                        <strong>Date:</strong> ${new Date(lastLocation.requested).toLocaleString('fr-FR')}<br>
+                        <strong>Position:</strong> ${lat.toFixed(6)}, ${lng.toFixed(6)}<br>
+                        ${lastLocation.accuracy ? `<strong>Précision:</strong> ±${lastLocation.accuracy.toFixed(0)}m` : ''}
+                    `);
+                    
+                    markersLayer.addLayer(marker);
+                    marker.openPopup();
+                    
+                    console.log(`Carte centrée sur la dernière position de ${uid}`);
+                }
+            } catch (error) {
+                console.error('Error centering on last position:', error);
+            }
+        }
+
+        // Permettre de valider avec Enter
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('tokenInput')?.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    submitToken();
+                }
+            });
+        });
+
+        // Initialiser la carte au chargement
+        window.addEventListener('load', async () => {
+            initMap();
+
+            // Charger le token
+            const token = loadAuthToken();
+            
+            if (token) {
+                // Vérifier le token et charger les utilisateurs
+                await loadUsers();
+            } else {
+                // Afficher le modal d'authentification
+                showAuthModal();
+            }
+        });
+    </script>
+</body>
+</html>

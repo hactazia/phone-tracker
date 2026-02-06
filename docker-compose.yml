@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  tracker:
+    image: hactazia/tracker
+    container_name: tracker-app
+    ports:
+      - "3054:3054"
+    env_file: .env
+    environment:
+      - NODE_ENV=production
+      - PORT=${PORT:-3054}
+      - DATABASE_URL=${DATABASE_URL:-file:/app/prisma/data/dev.db}
+    volumes:
+      - data:/app/prisma/data
+    restart: unless-stopped
+    networks:
+      - nginx
+
+  mosquitto:
+    image: eclipse-mosquitto:latest
+volumes:
+  dataks:
+  nginx:
+    name: nginx
+    driver: bridge
