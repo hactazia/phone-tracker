@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.location.Location
 import android.os.IBinder
 import android.os.Looper
@@ -21,11 +22,15 @@ import org.eclipse.paho.client.mqttv3.IMqttToken
 import org.eclipse.paho.client.mqttv3.MqttCallback
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttMessage
+import org.json.JSONArray
 import org.json.JSONObject
 
 class LocationService : Service() {
 
     companion object {
+        private const val LOCATION_BUFFER_PREFS = "location_buffer_prefs"
+        private const val LOCATION_BUFFER_KEY = "location_buffer"
+        private const val MAX_BUFFER_SIZE = 1000
         const val ACTION_TRACKING_STATUS = "fr.hactazia.tracker.TRACKING_STATUS"
         const val ACTION_MQTT_STATUS = "fr.hactazia.tracker.MQTT_STATUS"
         const val ACTION_REQUEST_STATUS = "fr.hactazia.tracker.REQUEST_STATUS"
@@ -36,8 +41,11 @@ class LocationService : Service() {
     private lateinit var locationClient: FusedLocationProviderClient
     private lateinit var mqttClient: MqttAndroidClient
     private lateinit var mqttPreferences: MqttPreferences
+    private lateinit var locationBufferPrefs: SharedPreferences
     private var isTracking = false
     private var isMqttConnected = false
+    private var isFlushingBufferedLocations = false
+    private val bufferedLocations = ArrayDeque<String>()
 
     private val statusRequestReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
@@ -52,6 +60,8 @@ class LocationService : Service() {
         super.onCreate()
 
         mqttPreferences = MqttPreferences(this)
+        locationBufferPrefs = getSharedPreferences(LOCATION_BUFFER_PREFS, MODE_PRIVATE)
+        loadBufferedLocations()
 
         // Vérifier si le service est activé
         if (!mqttPreferences.isServiceEnabled) {
@@ -118,6 +128,7 @@ class LocationService : Service() {
                 broadcastMqttStatus(true)
 
                 subscribeToRequestTopic()
+                flushBufferedLocations()
                 sendCurrentLocation()
             }
             override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
@@ -181,23 +192,35 @@ class LocationService : Service() {
     }
 
     private fun publishLocation(loc: Location) {
-        if (!mqttClient.isConnected) {
-            Log.w("LocationService", "MQTT not connected, skipping location publish")
-            return
-        }
-
         val payload = JSONObject().apply {
             put("pvd", loc.provider)
             put("lat", loc.latitude)
             put("lng", loc.longitude)
             put("acc", loc.accuracy)
             put("tts", System.currentTimeMillis())
+        }.toString()
+
+        if (!mqttClient.isConnected) {
+            Log.w("LocationService", "MQTT not connected, buffering location")
+            bufferLocation(payload)
+            return
         }
 
+        // Preserve chronological order when buffered items are pending.
+        if (bufferedLocations.isNotEmpty()) {
+            bufferLocation(payload)
+            flushBufferedLocations()
+            return
+        }
+
+        publishPayload(payload)
+    }
+
+    private fun publishPayload(payload: String) {
         Log.d("LocationService", "Publishing location: $payload to topic tracker/${mqttPreferences.username}")
         mqttClient.publish(
             "tracker/${mqttPreferences.username}",
-            payload.toString().toByteArray(),
+            payload.toByteArray(),
             1,
             false,
             null,
@@ -207,6 +230,77 @@ class LocationService : Service() {
                 }
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                     Log.e("MQTT", "Failed to publish location", exception)
+                    bufferLocation(payload)
+                }
+            }
+        )
+    }
+
+    private fun loadBufferedLocations() {
+        bufferedLocations.clear()
+
+        val rawBuffer = locationBufferPrefs.getString(LOCATION_BUFFER_KEY, null) ?: return
+        runCatching {
+            val array = JSONArray(rawBuffer)
+            for (index in 0 until array.length()) {
+                val payload = array.optString(index, "")
+                if (payload.isNotBlank()) {
+                    bufferedLocations.addLast(payload)
+                }
+            }
+        }.onFailure {
+            Log.e("LocationService", "Failed to load buffered locations", it)
+        }
+    }
+
+    private fun persistBufferedLocations() {
+        val array = JSONArray()
+        bufferedLocations.forEach { payload ->
+            array.put(payload)
+        }
+        locationBufferPrefs.edit().putString(LOCATION_BUFFER_KEY, array.toString()).apply()
+    }
+
+    private fun bufferLocation(payload: String) {
+        if (bufferedLocations.size >= MAX_BUFFER_SIZE) {
+            bufferedLocations.removeFirst()
+            Log.w("LocationService", "Location buffer full, dropping oldest entry")
+        }
+        bufferedLocations.addLast(payload)
+        persistBufferedLocations()
+    }
+
+    private fun flushBufferedLocations() {
+        if (!mqttClient.isConnected || isFlushingBufferedLocations || bufferedLocations.isEmpty()) {
+            return
+        }
+        isFlushingBufferedLocations = true
+        flushNextBufferedLocation()
+    }
+
+    private fun flushNextBufferedLocation() {
+        val nextPayload = bufferedLocations.firstOrNull()
+        if (nextPayload == null) {
+            isFlushingBufferedLocations = false
+            return
+        }
+
+        mqttClient.publish(
+            "tracker/${mqttPreferences.username}",
+            nextPayload.toByteArray(),
+            1,
+            false,
+            null,
+            object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttToken?) {
+                    bufferedLocations.removeFirst()
+                    persistBufferedLocations()
+                    flushNextBufferedLocation()
+                }
+
+                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    Log.e("MQTT", "Failed to flush buffered location", exception)
+                    isFlushingBufferedLocations = false
                 }
             }
         )
