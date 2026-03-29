@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.location.Location
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
@@ -19,23 +20,35 @@ import info.mqtt.android.service.MqttAndroidClient
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.IMqttToken
-import org.eclipse.paho.client.mqttv3.MqttCallback
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.min
 
 class LocationService : Service() {
 
     companion object {
+        private const val TAG = "LocationService"
         private const val LOCATION_BUFFER_PREFS = "location_buffer_prefs"
         private const val LOCATION_BUFFER_KEY = "location_buffer"
         private const val MAX_BUFFER_SIZE = 1000
+        private const val MAX_LOG_ENTRIES = 50
+        private const val MAX_QUEUE_SNAPSHOT_SIZE = 50
+        private const val MAX_RECONNECT_DELAY_MS = 60_000L
         const val ACTION_TRACKING_STATUS = "fr.hactazia.tracker.TRACKING_STATUS"
         const val ACTION_MQTT_STATUS = "fr.hactazia.tracker.MQTT_STATUS"
         const val ACTION_REQUEST_STATUS = "fr.hactazia.tracker.REQUEST_STATUS"
         const val EXTRA_IS_ACTIVE = "is_active"
         const val EXTRA_IS_CONNECTED = "is_connected"
+        const val EXTRA_LAST_SENT_AT = "last_sent_at"
+        const val EXTRA_QUEUE_SIZE = "queue_size"
+        const val EXTRA_LOG_ENTRIES = "log_entries"
+        const val EXTRA_QUEUE_ITEMS = "queue_items"
     }
 
     private lateinit var locationClient: FusedLocationProviderClient
@@ -44,8 +57,28 @@ class LocationService : Service() {
     private lateinit var locationBufferPrefs: SharedPreferences
     private var isTracking = false
     private var isMqttConnected = false
+    private var isMqttConnecting = false
+    private var isReconnectScheduled = false
+    private var reconnectAttempt = 0
+    private var lastSentAt = 0L
     private var isFlushingBufferedLocations = false
     private val bufferedLocations = ArrayDeque<String>()
+    private val logEntries = ArrayDeque<String>()
+    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private val periodicLocationHandler = Handler(Looper.getMainLooper())
+    private val logDateFormat = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault())
+
+    private val reconnectRunnable = Runnable {
+        isReconnectScheduled = false
+        connectMqtt()
+    }
+
+    private val periodicLocationRunnable = object : Runnable {
+        override fun run() {
+            capturePeriodicLocation()
+            periodicLocationHandler.postDelayed(this, mqttPreferences.locationMaxIntervalMs)
+        }
+    }
 
     private val statusRequestReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
@@ -65,7 +98,7 @@ class LocationService : Service() {
 
         // Vérifier si le service est activé
         if (!mqttPreferences.isServiceEnabled) {
-            Log.d("LocationService", "Service is disabled, stopping")
+            logDebug("Service is disabled, stopping")
             stopSelf()
             return
         }
@@ -94,23 +127,38 @@ class LocationService : Service() {
         )
 
         // Configurer le callback pour recevoir les messages
-        mqttClient.setCallback(object : MqttCallback {
+        mqttClient.setCallback(object : MqttCallbackExtended {
+            override fun connectComplete(reconnect: Boolean, serverURI: String?) {
+                logInfo("MQTT connected (reconnect=$reconnect, uri=$serverURI)")
+                reconnectAttempt = 0
+                isMqttConnecting = false
+                isReconnectScheduled = false
+                reconnectHandler.removeCallbacks(reconnectRunnable)
+                isMqttConnected = true
+                broadcastMqttStatus(true)
+                subscribeToRequestTopic()
+                flushBufferedLocations()
+                sendCurrentLocation()
+            }
+
             override fun connectionLost(cause: Throwable?) {
-                Log.e("MQTT", "Connection lost", cause)
+                logError("MQTT connection lost", cause)
+                isMqttConnecting = false
                 isMqttConnected = false
                 broadcastMqttStatus(false)
+                scheduleReconnect("connection lost")
             }
 
             override fun messageArrived(topic: String?, message: MqttMessage?) {
-                Log.d("MQTT", "Message received on topic: $topic")
+                logDebug("MQTT message received on topic: $topic")
                 if (topic == "tracker/${mqttPreferences.username}/request") {
-                    Log.d("MQTT", "Location request received, sending current position")
+                    logDebug("Location request received, sending current position")
                     sendCurrentLocation()
                 }
             }
 
             override fun deliveryComplete(token: IMqttDeliveryToken?) {
-                // Message delivery complete
+                logVerbose("MQTT delivery complete")
             }
         })
 
@@ -121,31 +169,63 @@ class LocationService : Service() {
             isCleanSession = false
         }
 
+        connectMqtt(options)
+    }
+
+    private fun connectMqtt(existingOptions: MqttConnectOptions? = null) {
+        if (mqttClient.isConnected || isMqttConnecting) {
+            logDebug("Skipping connect, connected=${mqttClient.isConnected}, connecting=$isMqttConnecting")
+            return
+        }
+
+        val options = existingOptions ?: MqttConnectOptions().apply {
+            userName = mqttPreferences.username
+            password = mqttPreferences.password.toCharArray()
+            isAutomaticReconnect = true
+            isCleanSession = false
+        }
+
+        isMqttConnecting = true
+        logInfo("Connecting to MQTT broker ${mqttPreferences.brokerUrl} (attempt=${reconnectAttempt + 1})")
         mqttClient.connect(options, null, object : IMqttActionListener {
             override fun onSuccess(asyncActionToken: IMqttToken?) {
-                Log.d("MQTT", "Connected")
-                isMqttConnected = true
-                broadcastMqttStatus(true)
-
-                subscribeToRequestTopic()
-                flushBufferedLocations()
-                sendCurrentLocation()
+                logDebug("MQTT connect request sent successfully")
             }
+
             override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                Log.e("MQTT", "Connection failed", exception)
+                isMqttConnecting = false
                 isMqttConnected = false
+                logError("MQTT connection failed", exception)
                 broadcastMqttStatus(false)
+                scheduleReconnect("initial connect failure")
             }
         })
+    }
+
+    private fun scheduleReconnect(reason: String) {
+        if (!mqttPreferences.isServiceEnabled) {
+            logDebug("Reconnect skipped, service disabled")
+            return
+        }
+
+        if (isReconnectScheduled || mqttClient.isConnected || isMqttConnecting) {
+            return
+        }
+
+        val delay = min(MAX_RECONNECT_DELAY_MS, (1_000L shl min(reconnectAttempt, 6)))
+        reconnectAttempt += 1
+        isReconnectScheduled = true
+        logWarn("Scheduling MQTT reconnect in ${delay}ms (reason=$reason, attempt=$reconnectAttempt)")
+        reconnectHandler.postDelayed(reconnectRunnable, delay)
     }
 
     private fun subscribeToRequestTopic() {
         mqttClient.subscribe("tracker/${mqttPreferences.username}/request", 1, null, object : IMqttActionListener {
             override fun onSuccess(asyncActionToken: IMqttToken?) {
-                Log.d("MQTT", "Subscribed to tracker/${mqttPreferences.username}/request")
+                logInfo("Subscribed to tracker/${mqttPreferences.username}/request")
             }
             override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                Log.e("MQTT", "Failed to subscribe to tracker/${mqttPreferences.username}/request", exception)
+                logError("Failed to subscribe to tracker/${mqttPreferences.username}/request", exception)
             }
         })
     }
@@ -154,31 +234,54 @@ class LocationService : Service() {
     private fun sendCurrentLocation() {
         locationClient.lastLocation.addOnSuccessListener { location ->
             if (location != null) {
-                Log.d("LocationService", "Sending current location after MQTT connection")
+                logDebug("Sending current location after MQTT connection")
                 publishLocation(location)
             } else {
-                Log.d("LocationService", "No current location available")
+                logDebug("No current location available")
             }
         }.addOnFailureListener { exception ->
-            Log.e("LocationService", "Failed to get current location", exception)
+            logError("Failed to get current location", exception)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun capturePeriodicLocation() {
+        locationClient.lastLocation.addOnSuccessListener { location ->
+            if (location != null) {
+                logDebug("Periodic location capture triggered")
+                publishLocation(location)
+            } else {
+                logWarn("Periodic location capture skipped, no cached location available")
+            }
+        }.addOnFailureListener { exception ->
+            logError("Failed to capture periodic location", exception)
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun startLocation() {
+        val maxIntervalMs = mqttPreferences.locationMaxIntervalMs
+        val minIntervalMs = mqttPreferences.locationMinIntervalMs
+        val minDistanceM = mqttPreferences.locationMinDistanceM
+
         val request = LocationRequest.Builder(
             Priority.PRIORITY_BALANCED_POWER_ACCURACY,
-            1_800_000L // 30 minutes
+            maxIntervalMs
         )
-            .setMinUpdateIntervalMillis(30_000L) // 30 secondes si mouvement détecté
-            .setMinUpdateDistanceMeters(30f)
+            .setMinUpdateIntervalMillis(minIntervalMs)
+            .setMinUpdateDistanceMeters(minDistanceM)
             .build()
+
+        logInfo("Location request configured: maxInterval=${maxIntervalMs}ms minInterval=${minIntervalMs}ms minDistance=${minDistanceM}m")
 
         locationClient.requestLocationUpdates(
             request,
             callback,
             Looper.getMainLooper()
         )
+
+        periodicLocationHandler.removeCallbacks(periodicLocationRunnable)
+        periodicLocationHandler.postDelayed(periodicLocationRunnable, maxIntervalMs)
 
         isTracking = true
         broadcastTrackingStatus(true)
@@ -201,7 +304,7 @@ class LocationService : Service() {
         }.toString()
 
         if (!mqttClient.isConnected) {
-            Log.w("LocationService", "MQTT not connected, buffering location")
+            logWarn("MQTT not connected, enqueue location")
             bufferLocation(payload)
             return
         }
@@ -217,7 +320,7 @@ class LocationService : Service() {
     }
 
     private fun publishPayload(payload: String) {
-        Log.d("LocationService", "Publishing location: $payload to topic tracker/${mqttPreferences.username}")
+        logDebug("Publishing location to tracker/${mqttPreferences.username}")
         mqttClient.publish(
             "tracker/${mqttPreferences.username}",
             payload.toByteArray(),
@@ -226,10 +329,12 @@ class LocationService : Service() {
             null,
             object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    Log.d("MQTT", "Location published")
+                    lastSentAt = System.currentTimeMillis()
+                    logInfo("Location published successfully at $lastSentAt")
+                    broadcastMqttStatus(isMqttConnected)
                 }
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e("MQTT", "Failed to publish location", exception)
+                    logError("Failed to publish location, enqueue payload", exception)
                     bufferLocation(payload)
                 }
             }
@@ -248,8 +353,10 @@ class LocationService : Service() {
                     bufferedLocations.addLast(payload)
                 }
             }
+            logInfo("Loaded ${bufferedLocations.size} buffered locations from storage")
+            broadcastMqttStatus(isMqttConnected)
         }.onFailure {
-            Log.e("LocationService", "Failed to load buffered locations", it)
+            logError("Failed to load buffered locations", it)
         }
     }
 
@@ -262,18 +369,22 @@ class LocationService : Service() {
     }
 
     private fun bufferLocation(payload: String) {
+        val previousSize = bufferedLocations.size
         if (bufferedLocations.size >= MAX_BUFFER_SIZE) {
             bufferedLocations.removeFirst()
-            Log.w("LocationService", "Location buffer full, dropping oldest entry")
+            logWarn("Location queue full, dropping oldest entry")
         }
         bufferedLocations.addLast(payload)
         persistBufferedLocations()
+        logInfo("Queued location (size: $previousSize -> ${bufferedLocations.size})")
+        broadcastMqttStatus(isMqttConnected)
     }
 
     private fun flushBufferedLocations() {
         if (!mqttClient.isConnected || isFlushingBufferedLocations || bufferedLocations.isEmpty()) {
             return
         }
+        logInfo("Flushing ${bufferedLocations.size} queued location(s)")
         isFlushingBufferedLocations = true
         flushNextBufferedLocation()
     }
@@ -282,6 +393,7 @@ class LocationService : Service() {
         val nextPayload = bufferedLocations.firstOrNull()
         if (nextPayload == null) {
             isFlushingBufferedLocations = false
+            logInfo("Queue flush complete")
             return
         }
 
@@ -295,12 +407,16 @@ class LocationService : Service() {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
                     bufferedLocations.removeFirst()
                     persistBufferedLocations()
+                    lastSentAt = System.currentTimeMillis()
+                    logInfo("Queued location sent, remaining=${bufferedLocations.size}")
+                    broadcastMqttStatus(isMqttConnected)
                     flushNextBufferedLocation()
                 }
 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e("MQTT", "Failed to flush buffered location", exception)
+                    logError("Failed to flush queued location", exception)
                     isFlushingBufferedLocations = false
+                    scheduleReconnect("flush failure")
                 }
             }
         )
@@ -320,10 +436,13 @@ class LocationService : Service() {
         locationClient.removeLocationUpdates(callback)
         isTracking = false
         broadcastTrackingStatus(false)
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        periodicLocationHandler.removeCallbacks(periodicLocationRunnable)
 
         // Déconnecter MQTT
         if (mqttClient.isConnected)
             mqttClient.disconnect()
+        mqttClient.unregisterResources()
         isMqttConnected = false
         broadcastMqttStatus(false)
 
@@ -334,21 +453,59 @@ class LocationService : Service() {
         }
     }
 
+    private fun logVerbose(message: String) {
+        Log.v(TAG, message)
+        appendLogEntry("VERBOSE", message)
+    }
+
+    private fun logDebug(message: String) {
+        Log.d(TAG, message)
+        appendLogEntry("DEBUG", message)
+    }
+
+    private fun logInfo(message: String) {
+        Log.i(TAG, message)
+        appendLogEntry("INFO", message)
+    }
+
+    private fun logWarn(message: String) {
+        Log.w(TAG, message)
+        appendLogEntry("WARN", message)
+    }
+
+    private fun logError(message: String, throwable: Throwable? = null) {
+        Log.e(TAG, message, throwable)
+        val details = throwable?.message?.takeIf { it.isNotBlank() }?.let { "$message | $it" } ?: message
+        appendLogEntry("ERROR", details)
+    }
+
+    private fun appendLogEntry(level: String, message: String) {
+        val timestamp = logDateFormat.format(Date())
+        if (logEntries.size >= MAX_LOG_ENTRIES) {
+            logEntries.removeFirst()
+        }
+        logEntries.addLast("$timestamp [$level] $message")
+    }
+
     private fun broadcastTrackingStatus(isActive: Boolean) {
         val intent = Intent(ACTION_TRACKING_STATUS).apply {
             putExtra(EXTRA_IS_ACTIVE, isActive)
             setPackage(packageName)
         }
         sendBroadcast(intent)
-        Log.d("LocationService", "Broadcast tracking status: $isActive")
+        logDebug("Broadcast tracking status: $isActive")
     }
 
     private fun broadcastMqttStatus(isConnected: Boolean) {
         val intent = Intent(ACTION_MQTT_STATUS).apply {
             putExtra(EXTRA_IS_CONNECTED, isConnected)
+            putExtra(EXTRA_LAST_SENT_AT, lastSentAt)
+            putExtra(EXTRA_QUEUE_SIZE, bufferedLocations.size)
+            putStringArrayListExtra(EXTRA_LOG_ENTRIES, ArrayList(logEntries))
+            putStringArrayListExtra(EXTRA_QUEUE_ITEMS, ArrayList(bufferedLocations.take(MAX_QUEUE_SNAPSHOT_SIZE)))
             setPackage(packageName)
         }
         sendBroadcast(intent)
-        Log.d("LocationService", "Broadcast MQTT status: $isConnected")
+        logDebug("Broadcast MQTT status: connected=$isConnected queue=${bufferedLocations.size} lastSentAt=$lastSentAt")
     }
 }

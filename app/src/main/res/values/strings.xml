@@ -17,4 +17,15 @@
     <string name="status_inactive">Inactif</string>
     <string name="status_connected">Connecté</string>
     <string name="status_disconnected">Déconnecté</string>
+    <string name="last_send_never">Dernier envoi : jamais</string>
+    <string name="last_send_at">Dernier envoi : %1$s</string>
+    <string name="queue_status_count">Queue : %1$d en attente</string>
+    <string name="queue_status_zero">Queue : 0 en attente</string>
+    <string name="logs_title">Logs MQTT</string>
+    <string name="queue_title">Queue des positions</string>
+    <string name="logs_empty">Aucun log pour le moment</string>
+    <string name="queue_empty">Aucun message en attente</string>
+    <string name="location_max_interval_seconds">Intervalle max localisation (secondes)</string>
+    <string name="location_min_interval_seconds">Intervalle min localisation (secondes)</string>
+    <string name="location_min_distance_meters">Distance min localisation (mètres)</string>
 </resources>
